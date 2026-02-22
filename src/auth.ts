@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { WHOOP_AUTH_URL, WHOOP_TOKEN_URL, WHOOP_SCOPES } from "./config.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -37,7 +38,6 @@ export class TokenManager {
   /**
    * Returns the current access token.
    * Priority: WHOOP_ACCESS_TOKEN env var > encrypted storage file.
-   * Phase 2: OAuth refresh is wired up in getValidAccessToken().
    */
   getAccessToken(): string {
     const envToken = process.env.WHOOP_ACCESS_TOKEN;
@@ -45,7 +45,6 @@ export class TokenManager {
       return envToken;
     }
 
-    // Fall back to stored tokens (loaded synchronously for simplicity)
     const stored = this.loadTokensSync();
     if (stored) {
       return stored.access_token;
@@ -53,9 +52,70 @@ export class TokenManager {
 
     throw new Error(
       "WHOOP_ACCESS_TOKEN is not set and no stored tokens found. " +
-      "Set a valid access token in your .env file, or complete the OAuth flow " +
-      "using whoop_get_auth_url and whoop_exchange_code."
+      "Use whoop_get_auth_url to start the OAuth flow."
     );
+  }
+
+  /**
+   * Returns the Whoop OAuth authorization URL for the user to visit.
+   */
+  getAuthorizationUrl(): string {
+    const clientId = process.env.WHOOP_CLIENT_ID;
+    const redirectUri = process.env.WHOOP_REDIRECT_URI ?? "http://localhost:3000/callback";
+
+    if (!clientId) {
+      throw new Error("WHOOP_CLIENT_ID is not set in .env");
+    }
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: WHOOP_SCOPES.join(" "),
+    });
+
+    return `${WHOOP_AUTH_URL}?${params.toString()}`;
+  }
+
+  /**
+   * Exchanges an authorization code for access + refresh tokens.
+   * Saves the tokens to encrypted storage after a successful exchange.
+   */
+  async exchangeCode(code: string): Promise<void> {
+    const clientId = process.env.WHOOP_CLIENT_ID;
+    const clientSecret = process.env.WHOOP_CLIENT_SECRET;
+    const redirectUri = process.env.WHOOP_REDIRECT_URI ?? "http://localhost:3000/callback";
+
+    if (!clientId || !clientSecret) {
+      throw new Error("WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET must be set in .env");
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+    });
+
+    const response = await fetch(WHOOP_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Token exchange failed: ${response.status}`);
+    }
+
+    const data = await response.json() as {
+      access_token: string;
+      refresh_token: string;
+      expires_in: number;
+    };
+
+    const expiresAt = Date.now() + data.expires_in * 1000;
+    await this.saveTokens(data.access_token, data.refresh_token, expiresAt);
   }
 
   /**
@@ -82,7 +142,6 @@ export class TokenManager {
 
     const tokenPath = join(this.storageDir, TOKEN_FILE);
     writeFileSync(tokenPath, envelope, { encoding: "utf-8", mode: 0o600 });
-    // Ensure 600 even if file already existed with different perms
     chmodSync(tokenPath, 0o600);
   }
 
@@ -126,7 +185,6 @@ export class TokenManager {
       return Buffer.from(hex, "hex");
     }
 
-    // Generate new 256-bit key
     const key = randomBytes(32);
     writeFileSync(keyPath, key.toString("hex"), { encoding: "utf-8", mode: 0o600 });
     chmodSync(keyPath, 0o600);

@@ -4,6 +4,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { WhoopClient } from "./whoop-client.js";
+import type { TokenManager } from "./auth.js";
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -219,11 +220,33 @@ const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: "whoop_get_auth_url",
+    description:
+      "Returns the Whoop OAuth authorization URL. Open this URL in a browser to authorize the app. After authorizing, you will receive a code — pass it to whoop_exchange_code.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "whoop_exchange_code",
+    description:
+      "Exchanges the authorization code from the Whoop OAuth flow for access and refresh tokens. Tokens are saved encrypted locally.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        code: { type: "string", description: "Authorization code from the Whoop redirect URL" },
+      },
+      required: ["code"],
+    },
+  },
 ];
 
 // ─── Server factory ───────────────────────────────────────────────────────────
 
-export function createWhoopServer(client: WhoopClient): Server {
+export function createWhoopServer(client: WhoopClient, tokenManager?: TokenManager): Server {
   const server = new Server(
     { name: "whoop-mcp", version: "1.0.0" },
     { capabilities: { tools: {} } }
@@ -429,6 +452,32 @@ export function createWhoopServer(client: WhoopClient): Server {
             max_heart_rate: body.max_heart_rate,
           }),
         }],
+      };
+    }
+
+    // ── whoop_get_auth_url ────────────────────────────────────────────────────
+    if (name === "whoop_get_auth_url") {
+      if (!tokenManager) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "TokenManager not provided to server." }) }], isError: true };
+      }
+      const url = tokenManager.getAuthorizationUrl();
+      return {
+        content: [{ type: "text", text: `Visit this URL to authorize Whoop access:\n\n${url}\n\nAfter authorizing, copy the code from the redirect URL and pass it to whoop_exchange_code.` }],
+      };
+    }
+
+    // ── whoop_exchange_code ───────────────────────────────────────────────────
+    if (name === "whoop_exchange_code") {
+      const code = (args as Record<string, unknown>).code as string | undefined;
+      if (!code) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "code parameter is required." }) }], isError: true };
+      }
+      if (!tokenManager) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "TokenManager not provided to server." }) }], isError: true };
+      }
+      await tokenManager.exchangeCode(code);
+      return {
+        content: [{ type: "text", text: "✅ Authorization successful. Tokens saved. You can now use all Whoop data tools." }],
       };
     }
 

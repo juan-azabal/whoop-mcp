@@ -6,7 +6,7 @@ import { createWhoopServer } from "./server.js";
 async function main() {
   const tokenManager = new TokenManager();
   const client = new WhoopClient(tokenManager);
-  const server = createWhoopServer(client);
+  const server = createWhoopServer(client, tokenManager);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
