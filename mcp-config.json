@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "whoop": {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx/esm",
+        "/ABSOLUTE/PATH/TO/whoop-mcp/src/index.ts"
+      ],
+      "env": {
+        "WHOOP_CLIENT_ID": "your_client_id_here",
+        "WHOOP_CLIENT_SECRET": "your_client_secret_here",
+        "WHOOP_REDIRECT_URI": "http://localhost:3000/callback"
+      }
+    }
+  }
+}
