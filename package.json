@@ -6,7 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "build": "tsc",
-    "test": "node --test --require tsx/cjs __tests__/**/*.test.ts",
+    "test": "node --test --import tsx/esm __tests__/smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "repository": {
@@ -16,7 +16,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "bugs": {
     "url": "https://github.com/juan-azabal/whoop-mcp/issues"
   },
