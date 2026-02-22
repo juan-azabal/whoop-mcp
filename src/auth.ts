@@ -57,6 +57,14 @@ export class TokenManager {
   }
 
   /**
+   * Returns true when a valid (non-placeholder) env token is present.
+   */
+  hasValidEnvToken(): boolean {
+    const t = process.env.WHOOP_ACCESS_TOKEN;
+    return !!t && !PLACEHOLDER_TOKENS.has(t);
+  }
+
+  /**
    * Returns the Whoop OAuth authorization URL for the user to visit.
    */
   getAuthorizationUrl(): string {
@@ -119,6 +127,61 @@ export class TokenManager {
   }
 
   /**
+   * Uses the stored refresh_token to obtain new access + refresh tokens.
+   */
+  async refreshAccessToken(): Promise<void> {
+    const stored = this.loadTokensSync();
+    if (!stored?.refresh_token) {
+      throw new Error("No refresh token available. Re-authorize via whoop_get_auth_url.");
+    }
+    const clientId = process.env.WHOOP_CLIENT_ID;
+    const clientSecret = process.env.WHOOP_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error("WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET must be set.");
+    }
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: stored.refresh_token,
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
+    const response = await fetch(WHOOP_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+    if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`);
+    const data = await response.json() as {
+      access_token: string;
+      refresh_token: string;
+      expires_in: number;
+    };
+    await this.saveTokens(data.access_token, data.refresh_token, Date.now() + data.expires_in * 1000);
+  }
+
+  /**
+   * Returns a valid access token, auto-refreshing if the stored token is expired.
+   * If a valid env token exists, it is returned immediately (no expiry tracking for env tokens).
+   */
+  async getValidAccessToken(): Promise<string> {
+    // If env token exists, return it (no expiry tracking for env tokens)
+    const envToken = process.env.WHOOP_ACCESS_TOKEN;
+    if (envToken && !PLACEHOLDER_TOKENS.has(envToken)) return envToken;
+
+    const stored = this.loadTokensSync();
+    if (!stored) throw new Error("No tokens found. Use whoop_get_auth_url to authorize.");
+
+    // If expired (with 60s buffer), refresh
+    if (stored.expires_at < Date.now() + 60_000) {
+      await this.refreshAccessToken();
+      const refreshed = this.loadTokensSync();
+      if (!refreshed) throw new Error("Token refresh succeeded but tokens not saved.");
+      return refreshed.access_token;
+    }
+    return stored.access_token;
+  }
+
+  /**
    * Encrypts and saves tokens to storage/tokens.json.
    */
   async saveTokens(
@@ -155,7 +218,7 @@ export class TokenManager {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  private loadTokensSync(): StoredTokens | null {
+  loadTokensSync(): StoredTokens | null {
     const tokenPath = join(this.storageDir, TOKEN_FILE);
     if (!existsSync(tokenPath)) return null;
 

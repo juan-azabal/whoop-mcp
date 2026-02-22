@@ -1,5 +1,5 @@
-import { WHOOP_BASE_URL } from "./config.js";
-import type { TokenManager } from "./auth.js";
+import { WHOOP_BASE_URL, CACHE_TTL_MS } from "./config.js";
+import { TokenManager } from "./auth.js";
 import type {
   WhoopRecoveryRecord,
   WhoopSleepRecord,
@@ -28,10 +28,41 @@ export class WhoopApiError extends Error {
   }
 }
 
+export class WhoopRateLimitError extends Error {
+  constructor(public readonly retryAfter: number) {
+    super(`Rate limited. Retry after ${retryAfter}s.`);
+    this.name = "WhoopRateLimitError";
+  }
+}
+
+// ─── Cache ────────────────────────────────────────────────────────────────────
+
+interface CacheEntry {
+  data: unknown;
+  expiresAt: number;
+}
+
 // ─── Client ───────────────────────────────────────────────────────────────────
 
 export class WhoopClient {
-  constructor(private readonly tokenManager: TokenManager) {}
+  private cache = new Map<string, CacheEntry>();
+  private readonly cacheTtlMs: number;
+
+  constructor(private readonly tokenManager: TokenManager, cacheTtlMs = CACHE_TTL_MS) {
+    this.cacheTtlMs = cacheTtlMs;
+  }
+
+  clearCache(): void {
+    this.cache.clear();
+  }
+
+  getCacheSize(): number {
+    return this.cache.size;
+  }
+
+  private cacheKey(path: string, params: Record<string, string | number>): string {
+    return `${path}:${JSON.stringify(params)}`;
+  }
 
   private authHeaders(): Record<string, string> {
     return {
@@ -41,25 +72,59 @@ export class WhoopClient {
   }
 
   private async get<T>(path: string, params: Record<string, string | number> = {}): Promise<T> {
-    const url = new URL(`${WHOOP_BASE_URL}${path}`);
-    for (const [key, value] of Object.entries(params)) {
-      url.searchParams.set(key, String(value));
+    // Check cache first
+    const key = this.cacheKey(path, params);
+    const cached = this.cache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data as T;
     }
 
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: this.authHeaders(),
-    });
+    const url = new URL(`${WHOOP_BASE_URL}${path}`);
+    for (const [k, value] of Object.entries(params)) {
+      url.searchParams.set(k, String(value));
+    }
+
+    const doRequest = async () => {
+      return fetch(url.toString(), {
+        method: "GET",
+        headers: this.authHeaders(),
+      });
+    };
+
+    const response = await doRequest();
 
     if (response.status === 401) {
-      throw new WhoopAuthError();
+      // Try to refresh and retry once
+      try {
+        await this.tokenManager.refreshAccessToken();
+        const retryResponse = await doRequest();
+        if (retryResponse.status === 401) throw new WhoopAuthError();
+        if (retryResponse.status === 429) {
+          const retryAfter = parseInt(retryResponse.headers.get("Retry-After") ?? "60", 10);
+          throw new WhoopRateLimitError(retryAfter);
+        }
+        if (!retryResponse.ok) throw new WhoopApiError(retryResponse.status, `Whoop API error: ${retryResponse.status}`);
+        const result = await retryResponse.json() as T;
+        this.cache.set(key, { data: result, expiresAt: Date.now() + this.cacheTtlMs });
+        return result;
+      } catch (e) {
+        if (e instanceof WhoopAuthError || e instanceof WhoopRateLimitError || e instanceof WhoopApiError) throw e;
+        throw new WhoopAuthError();
+      }
+    }
+
+    if (response.status === 429) {
+      const retryAfter = parseInt(response.headers.get("Retry-After") ?? "60", 10);
+      throw new WhoopRateLimitError(retryAfter);
     }
 
     if (!response.ok) {
       throw new WhoopApiError(response.status, `Whoop API error: ${response.status}`);
     }
 
-    return response.json() as Promise<T>;
+    const result = await response.json() as T;
+    this.cache.set(key, { data: result, expiresAt: Date.now() + this.cacheTtlMs });
+    return result;
   }
 
   /**
