@@ -150,7 +150,7 @@ export class WhoopClient {
     end: string,
     limit: number
   ): Promise<WhoopPaginatedResponse<WhoopSleepRecord>> {
-    return this.get<WhoopPaginatedResponse<WhoopSleepRecord>>("/sleep", {
+    return this.get<WhoopPaginatedResponse<WhoopSleepRecord>>("/activity/sleep", {
       start,
       end,
       limit,
@@ -180,7 +180,7 @@ export class WhoopClient {
     end: string,
     limit: number
   ): Promise<WhoopPaginatedResponse<WhoopWorkoutRecord>> {
-    return this.get<WhoopPaginatedResponse<WhoopWorkoutRecord>>("/workout", {
+    return this.get<WhoopPaginatedResponse<WhoopWorkoutRecord>>("/activity/workout", {
       start,
       end,
       limit,

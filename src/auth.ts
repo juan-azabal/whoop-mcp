@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WHOOP_AUTH_URL, WHOOP_TOKEN_URL, WHOOP_SCOPES } from "./config.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -11,7 +12,8 @@ const PLACEHOLDER_TOKENS = new Set([
   "",
 ]);
 
-const DEFAULT_STORAGE_DIR = join(process.cwd(), "storage");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_STORAGE_DIR = join(__dirname, "..", "storage");
 const KEY_FILE = ".encryption_key";
 const TOKEN_FILE = "tokens.json";
 const ALGORITHM = "aes-256-cbc";
@@ -75,11 +77,13 @@ export class TokenManager {
       throw new Error("WHOOP_CLIENT_ID is not set in .env");
     }
 
+    const state = randomBytes(16).toString("hex");
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
       response_type: "code",
       scope: WHOOP_SCOPES.join(" "),
+      state,
     });
 
     return `${WHOOP_AUTH_URL}?${params.toString()}`;
