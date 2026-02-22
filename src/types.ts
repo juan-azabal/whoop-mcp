@@ -59,10 +59,11 @@ export interface WhoopWorkoutScore {
 }
 
 export interface WhoopWorkoutRecord {
-  id: number;
+  id: number | string;
   start: string;
   end: string;
-  sport_id: number;
+  sport_id: number | null;
+  sport_name?: string | null;
   score_state: string;
   score: WhoopWorkoutScore;
 }

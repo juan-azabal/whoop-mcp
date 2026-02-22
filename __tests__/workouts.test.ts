@@ -125,3 +125,83 @@ test("get_workouts_recent maps sport_id to activity_type correctly", async () =>
 
   delete process.env.WHOOP_ACCESS_TOKEN;
 });
+
+test("get_workouts_recent uses sport_name when sport_id is null (v2 API)", async () => {
+  const responseWithSportName = {
+    records: [
+      {
+        id: "uuid-1",
+        start: "2026-02-22T10:28:30.660Z",
+        end: "2026-02-22T10:44:59.660Z",
+        sport_id: null,
+        sport_name: "bouldering",
+        score_state: "SCORED",
+        score: { strain: 4.41, average_heart_rate: 95, max_heart_rate: 138, kilojoule: 180 },
+      },
+    ],
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => responseWithSportName,
+  })) as unknown as typeof fetch;
+
+  const { createWhoopServer } = await import("../src/server.js");
+  const { TokenManager } = await import("../src/auth.js");
+  const { WhoopClient } = await import("../src/whoop-client.js");
+
+  const tm = new TokenManager();
+  const client = new WhoopClient(tm);
+  const server = createWhoopServer(client);
+
+  const handler = (server as unknown as { _requestHandlers: Map<string, (req: unknown) => Promise<unknown>> })
+    ._requestHandlers.get("tools/call");
+
+  const response = await handler({
+    method: "tools/call",
+    params: { name: "get_workouts_recent", arguments: {} },
+  }) as { content: Array<{ type: string; text: string }> };
+
+  const data = JSON.parse(response.content[0].text) as {
+    records: Array<{ activity_type: string }>;
+  };
+
+  assert.equal(data.records[0].activity_type, "bouldering", "sport_name should be used when sport_id is null");
+
+  delete process.env.WHOOP_ACCESS_TOKEN;
+});
+
+test("get_workouts_recent caps limit at 25 regardless of days requested", async () => {
+  let capturedUrl = "";
+  global.fetch = mock.fn(async (url: string) => {
+    capturedUrl = url;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [], next_token: null }),
+    };
+  }) as unknown as typeof fetch;
+
+  const { createWhoopServer } = await import("../src/server.js");
+  const { TokenManager } = await import("../src/auth.js");
+  const { WhoopClient } = await import("../src/whoop-client.js");
+
+  const tm = new TokenManager();
+  const client = new WhoopClient(tm);
+  const server = createWhoopServer(client);
+
+  const handler = (server as unknown as { _requestHandlers: Map<string, (req: unknown) => Promise<unknown>> })
+    ._requestHandlers.get("tools/call");
+
+  await handler({
+    method: "tools/call",
+    params: { name: "get_workouts_recent", arguments: { days: 10 } },
+  });
+
+  const url = new URL(capturedUrl);
+  const limit = parseInt(url.searchParams.get("limit") ?? "0", 10);
+  assert.ok(limit <= 25, `limit should be <= 25, got ${limit}`);
+
+  delete process.env.WHOOP_ACCESS_TOKEN;
+});
