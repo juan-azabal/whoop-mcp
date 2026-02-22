@@ -473,11 +473,11 @@ export function createWhoopServer(client: WhoopClient, tokenManager?: TokenManag
           ? (args as Record<string, unknown>).days as number
           : 7;
         const { start, end } = lastNDaysRange(days);
-        const response = await client.getWorkoutCollection(start, end, days * 5);
+        const response = await client.getWorkoutCollection(start, end, Math.min(days * 5, 25));
 
         const records = (response.records ?? []).map((r) => ({
           date: r.start.slice(0, 10),
-          activity_type: SPORT_ID_MAP[r.sport_id] ?? "Activity",
+          activity_type: r.sport_name ?? (r.sport_id != null ? SPORT_ID_MAP[r.sport_id] : undefined) ?? "Activity",
           strain: r.score.strain,
           duration_min: Math.round(
             (new Date(r.end).getTime() - new Date(r.start).getTime()) / 60000
