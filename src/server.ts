@@ -4,6 +4,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { WhoopClient } from "./whoop-client.js";
+import { WhoopAuthError, WhoopRateLimitError } from "./whoop-client.js";
 import type { TokenManager } from "./auth.js";
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -132,6 +133,40 @@ const SPORT_ID_MAP: Record<number, string> = {
   [-1]: "Activity",
 };
 
+// ─── Error response helper ────────────────────────────────────────────────────
+
+function errorResponse(err: unknown): { content: Array<{ type: string; text: string }>; isError: true } {
+  if (err instanceof WhoopAuthError) {
+    return {
+      content: [{ type: "text", text: "Re-authorization required. Use whoop_get_auth_url to reconnect." }],
+      isError: true,
+    };
+  }
+  if (err instanceof WhoopRateLimitError) {
+    return {
+      content: [{ type: "text", text: `Rate limited. Try again in ${err.retryAfter} seconds.` }],
+      isError: true,
+    };
+  }
+  if (err instanceof TypeError && (err as Error).message.includes("fetch")) {
+    return {
+      content: [{ type: "text", text: "Cannot reach Whoop API. Check your internet connection." }],
+      isError: true,
+    };
+  }
+  if (
+    (err instanceof Error && err.message.includes("not set")) ||
+    (err instanceof Error && err.message.includes("No tokens"))
+  ) {
+    return {
+      content: [{ type: "text", text: "Not authenticated. Use whoop_get_auth_url to connect your Whoop account." }],
+      isError: true,
+    };
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+}
+
 // ─── Tool definitions (for tools/list) ───────────────────────────────────────
 
 const TOOL_DEFINITIONS = [
@@ -242,6 +277,26 @@ const TOOL_DEFINITIONS = [
       required: ["code"],
     },
   },
+  {
+    name: "whoop_clear_cache",
+    description:
+      "Clears the in-memory response cache. Use this to force fresh data on the next API call.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "whoop_status",
+    description:
+      "Returns the current connection status: auth state, token source, expiry, and cache size.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // ─── Server factory ───────────────────────────────────────────────────────────
@@ -263,228 +318,269 @@ export function createWhoopServer(client: WhoopClient, tokenManager?: TokenManag
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
 
-    // ── get_recovery_today ──────────────────────────────────────────────────
-    if (name === "get_recovery_today") {
-      const { start, end } = todayISORange();
-      const response = await client.getRecoveryCollection(start, end, 1);
+    try {
+      // ── get_recovery_today ────────────────────────────────────────────────
+      if (name === "get_recovery_today") {
+        const { start, end } = todayISORange();
+        const response = await client.getRecoveryCollection(start, end, 1);
 
-      if (!response.records || response.records.length === 0) {
+        if (!response.records || response.records.length === 0) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ error: "No recovery data found for today." }) }],
+          };
+        }
+
+        const r = response.records[0];
         return {
-          content: [{ type: "text", text: JSON.stringify({ error: "No recovery data found for today." }) }],
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              recovery_score: r.score.recovery_score,
+              hrv_rmssd_milli: r.score.hrv_rmssd_milli,
+              resting_heart_rate: r.score.resting_heart_rate,
+              spo2_percentage: r.score.spo2_percentage,
+              skin_temp_celsius: r.score.skin_temp_celsius,
+            }),
+          }],
         };
       }
 
-      const r = response.records[0];
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            recovery_score: r.score.recovery_score,
-            hrv_rmssd_milli: r.score.hrv_rmssd_milli,
-            resting_heart_rate: r.score.resting_heart_rate,
-            spo2_percentage: r.score.spo2_percentage,
-            skin_temp_celsius: r.score.skin_temp_celsius,
-          }),
-        }],
-      };
-    }
+      // ── get_recovery_trend ────────────────────────────────────────────────
+      if (name === "get_recovery_trend") {
+        const days = typeof (args as Record<string, unknown>).days === "number"
+          ? (args as Record<string, unknown>).days as number
+          : 7;
+        const { start, end } = lastNDaysRange(days);
+        const response = await client.getRecoveryCollection(start, end, days);
 
-    // ── get_recovery_trend ──────────────────────────────────────────────────
-    if (name === "get_recovery_trend") {
-      const days = typeof (args as Record<string, unknown>).days === "number"
-        ? (args as Record<string, unknown>).days as number
-        : 7;
-      const { start, end } = lastNDaysRange(days);
-      const response = await client.getRecoveryCollection(start, end, days);
+        const records = (response.records ?? []).map((r) => ({
+          date: r.created_at.slice(0, 10),
+          recovery_score: r.score.recovery_score,
+          hrv: r.score.hrv_rmssd_milli,
+        }));
 
-      const records = (response.records ?? []).map((r) => ({
-        date: r.created_at.slice(0, 10),
-        recovery_score: r.score.recovery_score,
-        hrv: r.score.hrv_rmssd_milli,
-      }));
+        const avgRecovery = avg(records.map((r) => r.recovery_score));
+        const avgHrv = avg(records.map((r) => r.hrv));
 
-      const avgRecovery = avg(records.map((r) => r.recovery_score));
-      const avgHrv = avg(records.map((r) => r.hrv));
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            records,
-            avg_recovery: Math.round(avgRecovery * 10) / 10,
-            avg_hrv: Math.round(avgHrv * 10) / 10,
-          }),
-        }],
-      };
-    }
-
-    // ── get_sleep_last_night ────────────────────────────────────────────────
-    if (name === "get_sleep_last_night") {
-      const { start, end } = lastNDaysRange(1);
-      const response = await client.getSleepCollection(start, end, 1);
-
-      if (!response.records || response.records.length === 0) {
         return {
-          content: [{ type: "text", text: JSON.stringify({ error: "No sleep data found." }) }],
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              records,
+              avg_recovery: Math.round(avgRecovery * 10) / 10,
+              avg_hrv: Math.round(avgHrv * 10) / 10,
+            }),
+          }],
         };
       }
 
-      const r = response.records[0];
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            sleep_performance_pct: r.score.sleep_performance_percentage,
-            sws_milli: r.score.stage_summary.total_slow_wave_sleep_time_milli,
-            total_sleep_milli: r.score.stage_summary.total_in_bed_time_milli,
-            disturbance_count: r.score.stage_summary.disturbance_count,
-            respiratory_rate: r.score.respiratory_rate,
-          }),
-        }],
-      };
-    }
+      // ── get_sleep_last_night ──────────────────────────────────────────────
+      if (name === "get_sleep_last_night") {
+        const { start, end } = lastNDaysRange(1);
+        const response = await client.getSleepCollection(start, end, 1);
 
-    // ── get_strain_recent ───────────────────────────────────────────────────
-    if (name === "get_strain_recent") {
-      const days = typeof (args as Record<string, unknown>).days === "number"
-        ? (args as Record<string, unknown>).days as number
-        : 3;
-      const { start, end } = lastNDaysRange(days);
-      const response = await client.getCycleCollection(start, end, days);
+        if (!response.records || response.records.length === 0) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ error: "No sleep data found." }) }],
+          };
+        }
 
-      const records = (response.records ?? []).map((r) => ({
-        date: r.start.slice(0, 10),
-        strain: r.score.strain,
-        avg_hr: r.score.average_heart_rate,
-        max_hr: r.score.max_heart_rate,
-        kilojoule: r.score.kilojoule,
-      }));
-
-      const total_strain = records.reduce((sum, r) => sum + r.strain, 0);
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({ records, total_strain }),
-        }],
-      };
-    }
-
-    // ── get_hrv_analysis ────────────────────────────────────────────────────
-    if (name === "get_hrv_analysis") {
-      const { start, end } = lastNDaysRange(14);
-      const response = await client.getRecoveryCollection(start, end, 14);
-
-      const sorted = (response.records ?? [])
-        .slice()
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-      const hrv_7d = sorted.slice(0, 7).map((r) => r.score.hrv_rmssd_milli);
-      const hrv_14d = sorted.map((r) => r.score.hrv_rmssd_milli);
-
-      const hrv_7d_avg = avg(hrv_7d);
-      const hrv_14d_avg = avg(hrv_14d);
-      const hrv_cv_7d = hrv_7d.length > 0 ? (stdDev(hrv_7d) / hrv_7d_avg) * 100 : 0;
-
-      let trend: "up" | "stable" | "down";
-      if (hrv_7d_avg > hrv_14d_avg * 1.05) {
-        trend = "up";
-      } else if (hrv_7d_avg < hrv_14d_avg * 0.95) {
-        trend = "down";
-      } else {
-        trend = "stable";
+        const r = response.records[0];
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              sleep_performance_pct: r.score.sleep_performance_percentage,
+              sws_milli: r.score.stage_summary.total_slow_wave_sleep_time_milli,
+              total_sleep_milli: r.score.stage_summary.total_in_bed_time_milli,
+              disturbance_count: r.score.stage_summary.disturbance_count,
+              respiratory_rate: r.score.respiratory_rate,
+            }),
+          }],
+        };
       }
 
-      const deload_signal = hrv_cv_7d > 10 || hrv_7d_avg < hrv_14d_avg * 0.9;
+      // ── get_strain_recent ─────────────────────────────────────────────────
+      if (name === "get_strain_recent") {
+        const days = typeof (args as Record<string, unknown>).days === "number"
+          ? (args as Record<string, unknown>).days as number
+          : 3;
+        const { start, end } = lastNDaysRange(days);
+        const response = await client.getCycleCollection(start, end, days);
 
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            hrv_7d_avg: Math.round(hrv_7d_avg * 100) / 100,
-            hrv_14d_avg: Math.round(hrv_14d_avg * 100) / 100,
-            hrv_cv_7d: Math.round(hrv_cv_7d * 100) / 100,
-            trend,
-            deload_signal,
-          }),
-        }],
-      };
-    }
+        const records = (response.records ?? []).map((r) => ({
+          date: r.start.slice(0, 10),
+          strain: r.score.strain,
+          avg_hr: r.score.average_heart_rate,
+          max_hr: r.score.max_heart_rate,
+          kilojoule: r.score.kilojoule,
+        }));
 
-    // ── get_workouts_recent ─────────────────────────────────────────────────
-    if (name === "get_workouts_recent") {
-      const days = typeof (args as Record<string, unknown>).days === "number"
-        ? (args as Record<string, unknown>).days as number
-        : 7;
-      const { start, end } = lastNDaysRange(days);
-      const response = await client.getWorkoutCollection(start, end, days * 5);
+        const total_strain = records.reduce((sum, r) => sum + r.strain, 0);
 
-      const records = (response.records ?? []).map((r) => ({
-        date: r.start.slice(0, 10),
-        activity_type: SPORT_ID_MAP[r.sport_id] ?? "Activity",
-        strain: r.score.strain,
-        duration_min: Math.round(
-          (new Date(r.end).getTime() - new Date(r.start).getTime()) / 60000
-        ),
-        avg_hr: r.score.average_heart_rate,
-        max_hr: r.score.max_heart_rate,
-      }));
-
-      const total_strain = records.reduce((sum, r) => sum + r.strain, 0);
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({ records, count: records.length, total_strain }),
-        }],
-      };
-    }
-
-    // ── get_body_measurement ────────────────────────────────────────────────
-    if (name === "get_body_measurement") {
-      const body = await client.getBodyMeasurement();
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            weight_kg: body.weight_kilogram,
-            height_m: body.height_meter,
-            max_heart_rate: body.max_heart_rate,
-          }),
-        }],
-      };
-    }
-
-    // ── whoop_get_auth_url ────────────────────────────────────────────────────
-    if (name === "whoop_get_auth_url") {
-      if (!tokenManager) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: "TokenManager not provided to server." }) }], isError: true };
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ records, total_strain }),
+          }],
+        };
       }
-      const url = tokenManager.getAuthorizationUrl();
-      return {
-        content: [{ type: "text", text: `Visit this URL to authorize Whoop access:\n\n${url}\n\nAfter authorizing, copy the code from the redirect URL and pass it to whoop_exchange_code.` }],
-      };
-    }
 
-    // ── whoop_exchange_code ───────────────────────────────────────────────────
-    if (name === "whoop_exchange_code") {
-      const code = (args as Record<string, unknown>).code as string | undefined;
-      if (!code) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: "code parameter is required." }) }], isError: true };
-      }
-      if (!tokenManager) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: "TokenManager not provided to server." }) }], isError: true };
-      }
-      await tokenManager.exchangeCode(code);
-      return {
-        content: [{ type: "text", text: "✅ Authorization successful. Tokens saved. You can now use all Whoop data tools." }],
-      };
-    }
+      // ── get_hrv_analysis ──────────────────────────────────────────────────
+      if (name === "get_hrv_analysis") {
+        const { start, end } = lastNDaysRange(14);
+        const response = await client.getRecoveryCollection(start, end, 14);
 
-    return {
-      content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${name}` }) }],
-      isError: true,
-    };
+        const sorted = (response.records ?? [])
+          .slice()
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+        const hrv_7d = sorted.slice(0, 7).map((r) => r.score.hrv_rmssd_milli);
+        const hrv_14d = sorted.map((r) => r.score.hrv_rmssd_milli);
+
+        const hrv_7d_avg = avg(hrv_7d);
+        const hrv_14d_avg = avg(hrv_14d);
+        const hrv_cv_7d = hrv_7d.length > 0 ? (stdDev(hrv_7d) / hrv_7d_avg) * 100 : 0;
+
+        let trend: "up" | "stable" | "down";
+        if (hrv_7d_avg > hrv_14d_avg * 1.05) {
+          trend = "up";
+        } else if (hrv_7d_avg < hrv_14d_avg * 0.95) {
+          trend = "down";
+        } else {
+          trend = "stable";
+        }
+
+        const deload_signal = hrv_cv_7d > 10 || hrv_7d_avg < hrv_14d_avg * 0.9;
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              hrv_7d_avg: Math.round(hrv_7d_avg * 100) / 100,
+              hrv_14d_avg: Math.round(hrv_14d_avg * 100) / 100,
+              hrv_cv_7d: Math.round(hrv_cv_7d * 100) / 100,
+              trend,
+              deload_signal,
+            }),
+          }],
+        };
+      }
+
+      // ── get_workouts_recent ───────────────────────────────────────────────
+      if (name === "get_workouts_recent") {
+        const days = typeof (args as Record<string, unknown>).days === "number"
+          ? (args as Record<string, unknown>).days as number
+          : 7;
+        const { start, end } = lastNDaysRange(days);
+        const response = await client.getWorkoutCollection(start, end, days * 5);
+
+        const records = (response.records ?? []).map((r) => ({
+          date: r.start.slice(0, 10),
+          activity_type: SPORT_ID_MAP[r.sport_id] ?? "Activity",
+          strain: r.score.strain,
+          duration_min: Math.round(
+            (new Date(r.end).getTime() - new Date(r.start).getTime()) / 60000
+          ),
+          avg_hr: r.score.average_heart_rate,
+          max_hr: r.score.max_heart_rate,
+        }));
+
+        const total_strain = records.reduce((sum, r) => sum + r.strain, 0);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ records, count: records.length, total_strain }),
+          }],
+        };
+      }
+
+      // ── get_body_measurement ──────────────────────────────────────────────
+      if (name === "get_body_measurement") {
+        const body = await client.getBodyMeasurement();
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              weight_kg: body.weight_kilogram,
+              height_m: body.height_meter,
+              max_heart_rate: body.max_heart_rate,
+            }),
+          }],
+        };
+      }
+
+      // ── whoop_get_auth_url ────────────────────────────────────────────────
+      if (name === "whoop_get_auth_url") {
+        if (!tokenManager) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "TokenManager not provided to server." }) }], isError: true };
+        }
+        const url = tokenManager.getAuthorizationUrl();
+        return {
+          content: [{ type: "text", text: `Visit this URL to authorize Whoop access:\n\n${url}\n\nAfter authorizing, copy the code from the redirect URL and pass it to whoop_exchange_code.` }],
+        };
+      }
+
+      // ── whoop_exchange_code ───────────────────────────────────────────────
+      if (name === "whoop_exchange_code") {
+        const code = (args as Record<string, unknown>).code as string | undefined;
+        if (!code) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "code parameter is required." }) }], isError: true };
+        }
+        if (!tokenManager) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "TokenManager not provided to server." }) }], isError: true };
+        }
+        await tokenManager.exchangeCode(code);
+        return {
+          content: [{ type: "text", text: "Authorization successful. Tokens saved. You can now use all Whoop data tools." }],
+        };
+      }
+
+      // ── whoop_clear_cache ─────────────────────────────────────────────────
+      if (name === "whoop_clear_cache") {
+        client.clearCache();
+        return {
+          content: [{ type: "text", text: "Cache cleared. Next API calls will fetch fresh data." }],
+        };
+      }
+
+      // ── whoop_status ──────────────────────────────────────────────────────
+      if (name === "whoop_status") {
+        const hasEnvToken = tokenManager?.hasValidEnvToken() ?? false;
+        let authenticated = hasEnvToken;
+        let tokenSource: string = hasEnvToken ? "env" : "none";
+        let tokenExpiresAt: number | null = null;
+
+        if (!hasEnvToken && tokenManager) {
+          const stored = await tokenManager.loadTokens();
+          if (stored) {
+            authenticated = true;
+            tokenSource = "stored";
+            tokenExpiresAt = stored.expires_at;
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              authenticated,
+              token_source: tokenSource,
+              token_expires_at: tokenExpiresAt,
+              cache_size: client.getCacheSize(),
+            }),
+          }],
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${name}` }) }],
+        isError: true,
+      };
+    } catch (err) {
+      return errorResponse(err);
+    }
   });
 
   return server;
