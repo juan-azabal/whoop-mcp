@@ -2,6 +2,10 @@ import { WHOOP_BASE_URL } from "./config.js";
 import type { TokenManager } from "./auth.js";
 import type {
   WhoopRecoveryRecord,
+  WhoopSleepRecord,
+  WhoopCycleRecord,
+  WhoopWorkoutRecord,
+  WhoopBodyMeasurement,
   WhoopPaginatedResponse,
 } from "./types.js";
 
@@ -60,9 +64,6 @@ export class WhoopClient {
 
   /**
    * Fetches recovery records for a date range.
-   * @param start ISO date string "YYYY-MM-DD"
-   * @param end   ISO date string "YYYY-MM-DD"
-   * @param limit max records to return (1-25, Whoop default)
    */
   async getRecoveryCollection(
     start: string,
@@ -74,5 +75,57 @@ export class WhoopClient {
       end,
       limit,
     });
+  }
+
+  /**
+   * Fetches sleep records for a date range.
+   */
+  async getSleepCollection(
+    start: string,
+    end: string,
+    limit: number
+  ): Promise<WhoopPaginatedResponse<WhoopSleepRecord>> {
+    return this.get<WhoopPaginatedResponse<WhoopSleepRecord>>("/sleep", {
+      start,
+      end,
+      limit,
+    });
+  }
+
+  /**
+   * Fetches cycle (strain) records for a date range.
+   */
+  async getCycleCollection(
+    start: string,
+    end: string,
+    limit: number
+  ): Promise<WhoopPaginatedResponse<WhoopCycleRecord>> {
+    return this.get<WhoopPaginatedResponse<WhoopCycleRecord>>("/cycle", {
+      start,
+      end,
+      limit,
+    });
+  }
+
+  /**
+   * Fetches workout records for a date range.
+   */
+  async getWorkoutCollection(
+    start: string,
+    end: string,
+    limit: number
+  ): Promise<WhoopPaginatedResponse<WhoopWorkoutRecord>> {
+    return this.get<WhoopPaginatedResponse<WhoopWorkoutRecord>>("/workout", {
+      start,
+      end,
+      limit,
+    });
+  }
+
+  /**
+   * Fetches body measurement data.
+   */
+  async getBodyMeasurement(): Promise<WhoopBodyMeasurement> {
+    return this.get<WhoopBodyMeasurement>("/user/measurement/body");
   }
 }
